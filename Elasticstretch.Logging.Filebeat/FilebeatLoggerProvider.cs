@@ -3,6 +3,8 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using System.Collections.Concurrent;
+using System.Text.Json;
 
 /// <summary>
 /// A provider of loggers for use with Filebeat.
@@ -15,6 +17,8 @@ public class FilebeatLoggerProvider : ILoggerProvider
 {
     private readonly IOptions<ElasticLoggingOptions> elasticOptions;
     private readonly IOptions<FileLoggingOptions> fileOptions;
+
+    private readonly ConcurrentDictionary<string, ElasticLogPropertyOptions> categoryOptions = new();
 
     /// <summary>
     /// Initializes the provider.
@@ -46,6 +50,8 @@ public class FilebeatLoggerProvider : ILoggerProvider
     /// <param name="factory">The Elastic field factory.</param>
     protected virtual void WriteStatic(ElasticFieldFactory factory)
     {
+        ArgumentNullException.ThrowIfNull(factory, nameof(factory));
+        factory("ecs.version").WriteStringValue("8.9.0");
     }
 
     /// <summary>
@@ -58,6 +64,10 @@ public class FilebeatLoggerProvider : ILoggerProvider
     protected virtual void WriteScope<TState>(ElasticFieldFactory factory, string category, TState state)
         where TState : notnull
     {
+        ArgumentNullException.ThrowIfNull(factory, nameof(factory));
+        ArgumentNullException.ThrowIfNull(category, nameof(category));
+        ArgumentNullException.ThrowIfNull(state, nameof(state));
+        WriteState(factory, category, state);
     }
 
     /// <summary>
@@ -68,6 +78,38 @@ public class FilebeatLoggerProvider : ILoggerProvider
     /// <param name="entry">The log entry.</param>
     protected virtual void WriteEntry<TState>(ElasticFieldFactory factory, in LogEntry<TState> entry)
     {
+        ArgumentNullException.ThrowIfNull(factory, nameof(factory));
+
+        factory("@timestamp").WriteStringValue(DateTimeOffset.Now);
+        factory("message").WriteStringValue(entry.Formatter(entry.State, entry.Exception));
+
+        var logField = factory("log");
+
+        logField.WriteStartObject();
+        logField.WriteString("logger", entry.Category);
+
+        logField.WritePropertyName("level");
+        JsonSerializer.Serialize(logField, entry.LogLevel, elasticOptions.Value.Json);
+
+        logField.WriteEndObject();
+
+        if (entry.EventId != default)
+        {
+            var eventField = factory("event");
+
+            eventField.WriteStartObject();
+            eventField.WriteNumber("code", entry.EventId.Id);
+
+            if (entry.EventId.Name != null)
+            {
+                eventField.WriteString("action", entry.EventId.Name);
+            }
+
+            eventField.WriteEndObject();
+        }
+
+        WriteExceptions(factory, entry.Exception);
+        WriteState(factory, entry.Category, entry.State);
     }
 
     /// <summary>
@@ -80,6 +122,23 @@ public class FilebeatLoggerProvider : ILoggerProvider
     /// <param name="exception">The logged exception.</param>
     protected virtual void WriteException(ElasticFieldFactory factory, Exception exception)
     {
+        ArgumentNullException.ThrowIfNull(factory, nameof(factory));
+        ArgumentNullException.ThrowIfNull(exception, nameof(exception));
+
+        var errorField = factory("error");
+
+        errorField.WriteStartObject();
+        errorField.WriteString("message", exception.Message);
+
+        errorField.WritePropertyName("type");
+        JsonSerializer.Serialize(errorField, exception, elasticOptions.Value.Json);
+
+        if (exception.StackTrace != null)
+        {
+            errorField.WriteString("stack_trace", exception.StackTrace);
+        }
+
+        errorField.WriteEndObject();
     }
 
     /// <summary>
@@ -94,6 +153,34 @@ public class FilebeatLoggerProvider : ILoggerProvider
     /// <param name="value">The log property value.</param>
     protected virtual void WriteProperty(ElasticFieldFactory factory, string category, string name, object? value)
     {
+        ArgumentNullException.ThrowIfNull(factory, nameof(factory));
+        ArgumentNullException.ThrowIfNull(category, nameof(category));
+        ArgumentNullException.ThrowIfNull(name, nameof(name));
+
+        if (!categoryOptions.TryGetValue(category, out var opts))
+        {
+            opts = elasticOptions.Value;
+
+            foreach (var kvp in elasticOptions.Value.Categories)
+            {
+                if (CategoryMatch(kvp.Key, category))
+                {
+                    opts = kvp.Value;
+                    break;
+                }
+            }
+
+            categoryOptions[category] = opts;
+        }
+
+        if (opts.Mappings.TryGetValue(name, out var field))
+        {
+            JsonSerializer.Serialize(factory(field), value, elasticOptions.Value.Json);
+        }
+        else if (opts.IncludeOthers && name != "{OriginalFormat}")
+        {
+            JsonSerializer.Serialize(factory(name), value, elasticOptions.Value.Json);
+        }
     }
 
     /// <summary>
@@ -104,5 +191,59 @@ public class FilebeatLoggerProvider : ILoggerProvider
     /// </param>
     protected virtual void Dispose(bool disposing)
     {
+    }
+
+    // Use same prefix/wildcard matching as logger factory.
+    private static bool CategoryMatch(string pattern, string category)
+    {
+        const char WildcardChar = '*';
+        int wildcardIndex = pattern.IndexOf(WildcardChar, StringComparison.Ordinal);
+
+        if (wildcardIndex != -1 && pattern.IndexOf(WildcardChar, wildcardIndex + 1) != -1)
+        {
+            throw new InvalidOperationException("Only one wildcard character is allowed in category name.");
+        }
+
+        ReadOnlySpan<char> prefix, suffix;
+        if (wildcardIndex == -1)
+        {
+            prefix = pattern.AsSpan();
+            suffix = default;
+        }
+        else
+        {
+            prefix = pattern.AsSpan(0, wildcardIndex);
+            suffix = pattern.AsSpan(wildcardIndex + 1);
+        }
+
+        return category.AsSpan().StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
+            category.AsSpan().EndsWith(suffix, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void WriteExceptions(ElasticFieldFactory factory, Exception? exception)
+    {
+        if (exception is AggregateException aggregate)
+        {
+            foreach (var inner in aggregate.InnerExceptions)
+            {
+                WriteExceptions(factory, inner);
+            }
+        }
+        else if (exception != null)
+        {
+            WriteException(factory, exception);
+            WriteExceptions(factory, exception.InnerException);
+        }
+    }
+
+    private void WriteState<T>(ElasticFieldFactory factory, string category, T state)
+    {
+        if (state is IReadOnlyList<KeyValuePair<string, object?>> props)
+        {
+            for (var i = 0; i < props.Count; i++)
+            {
+                WriteProperty(factory, category, props[i].Key, props[i].Value);
+            }
+        }
     }
 }
