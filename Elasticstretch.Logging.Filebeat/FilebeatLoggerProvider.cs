@@ -2,6 +2,7 @@
 
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 
 /// <summary>
 /// A provider of loggers for use with Filebeat.
@@ -12,6 +13,20 @@ using Microsoft.Extensions.Logging.Abstractions;
 [ProviderAlias("Filebeat")]
 public class FilebeatLoggerProvider : ILoggerProvider
 {
+    private readonly IOptions<ElasticLoggingOptions> elasticOptions;
+    private readonly IOptions<FileLoggingOptions> fileOptions;
+
+    /// <summary>
+    /// Initializes the provider.
+    /// </summary>
+    /// <param name="elasticOptions">The Elastic logging options.</param>
+    /// <param name="fileOptions">The file logging options.</param>
+    public FilebeatLoggerProvider(IOptions<ElasticLoggingOptions> elasticOptions, IOptions<FileLoggingOptions> fileOptions)
+    {
+        this.elasticOptions = elasticOptions;
+        this.fileOptions = fileOptions;
+    }
+
     /// <inheritdoc/>
     public virtual ILogger CreateLogger(string categoryName)
     {
