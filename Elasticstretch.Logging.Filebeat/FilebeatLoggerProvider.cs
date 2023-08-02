@@ -15,10 +15,10 @@ using System.Text.Json;
 [ProviderAlias("Filebeat")]
 public class FilebeatLoggerProvider : ILoggerProvider
 {
-    private readonly IOptions<ElasticLoggingOptions> elasticOptions;
-    private readonly IOptions<FileLoggingOptions> fileOptions;
+    readonly IOptions<ElasticLoggingOptions> elasticOptions;
+    readonly IOptions<FileLoggingOptions> fileOptions;
 
-    private readonly ConcurrentDictionary<string, ElasticLogPropertyOptions> categoryOptions = new();
+    readonly ConcurrentDictionary<string, ElasticLogPropertyOptions> categoryOptions = new();
 
     /// <summary>
     /// Initializes the provider.
@@ -194,7 +194,7 @@ public class FilebeatLoggerProvider : ILoggerProvider
     }
 
     // Use same prefix/wildcard matching as logger factory.
-    private static bool CategoryMatch(string pattern, string category)
+    static bool CategoryMatch(string pattern, string category)
     {
         const char WildcardChar = '*';
         int wildcardIndex = pattern.IndexOf(WildcardChar, StringComparison.Ordinal);
@@ -220,7 +220,7 @@ public class FilebeatLoggerProvider : ILoggerProvider
             category.AsSpan().EndsWith(suffix, StringComparison.OrdinalIgnoreCase);
     }
 
-    private void WriteExceptions(ElasticFieldFactory factory, Exception? exception)
+    void WriteExceptions(ElasticFieldFactory factory, Exception? exception)
     {
         if (exception is AggregateException aggregate)
         {
@@ -236,7 +236,7 @@ public class FilebeatLoggerProvider : ILoggerProvider
         }
     }
 
-    private void WriteState<T>(ElasticFieldFactory factory, string category, T state)
+    void WriteState<T>(ElasticFieldFactory factory, string category, T state)
     {
         if (state is IReadOnlyList<KeyValuePair<string, object?>> props)
         {
