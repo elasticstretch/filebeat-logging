@@ -26,7 +26,9 @@ public class FilebeatLoggerProvider : ILoggerProvider
     /// </summary>
     /// <param name="elasticOptions">The Elastic logging options.</param>
     /// <param name="fileOptions">The file logging options.</param>
-    public FilebeatLoggerProvider(IOptions<ElasticLoggingOptions> elasticOptions, IOptions<FileLoggingOptions> fileOptions)
+    public FilebeatLoggerProvider(
+        IOptions<ElasticLoggingOptions> elasticOptions,
+        IOptions<FileLoggingOptions> fileOptions)
     {
         this.elasticOptions = elasticOptions;
         this.fileOptions = fileOptions;
