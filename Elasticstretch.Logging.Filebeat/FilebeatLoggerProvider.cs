@@ -18,6 +18,7 @@ public class FilebeatLoggerProvider : ILoggerProvider
     readonly IOptions<ElasticLoggingOptions> elasticOptions;
     readonly IOptions<FileLoggingOptions> fileOptions;
 
+    readonly ConcurrentDictionary<string, JsonEncodedText> textCache = new();
     readonly ConcurrentDictionary<string, ElasticLogPropertyOptions> categoryOptions = new();
 
     /// <summary>
@@ -51,7 +52,7 @@ public class FilebeatLoggerProvider : ILoggerProvider
     protected virtual void WriteStatic(ElasticFieldFactory factory)
     {
         ArgumentNullException.ThrowIfNull(factory, nameof(factory));
-        factory("ecs.version").WriteStringValue("8.9.0");
+        factory("ecs.version").WriteStringValue(CacheText("8.9.0"));
     }
 
     /// <summary>
@@ -86,9 +87,9 @@ public class FilebeatLoggerProvider : ILoggerProvider
         var logField = factory("log");
 
         logField.WriteStartObject();
-        logField.WriteString("logger", entry.Category);
+        logField.WriteString(CacheText("logger"), CacheText(entry.Category));
 
-        logField.WritePropertyName("level");
+        logField.WritePropertyName(CacheText("level"));
         JsonSerializer.Serialize(logField, entry.LogLevel, elasticOptions.Value.Json);
 
         logField.WriteEndObject();
@@ -98,11 +99,11 @@ public class FilebeatLoggerProvider : ILoggerProvider
             var eventField = factory("event");
 
             eventField.WriteStartObject();
-            eventField.WriteNumber("code", entry.EventId.Id);
+            eventField.WriteNumber(CacheText("code"), entry.EventId.Id);
 
             if (entry.EventId.Name != null)
             {
-                eventField.WriteString("action", entry.EventId.Name);
+                eventField.WriteString(CacheText("action"), entry.EventId.Name);
             }
 
             eventField.WriteEndObject();
@@ -128,14 +129,14 @@ public class FilebeatLoggerProvider : ILoggerProvider
         var errorField = factory("error");
 
         errorField.WriteStartObject();
-        errorField.WriteString("message", exception.Message);
+        errorField.WriteString(CacheText("message"), exception.Message);
 
-        errorField.WritePropertyName("type");
+        errorField.WritePropertyName(CacheText("type"));
         JsonSerializer.Serialize(errorField, exception, elasticOptions.Value.Json);
 
         if (exception.StackTrace != null)
         {
-            errorField.WriteString("stack_trace", exception.StackTrace);
+            errorField.WriteString(CacheText("stack_trace"), exception.StackTrace);
         }
 
         errorField.WriteEndObject();
@@ -245,5 +246,10 @@ public class FilebeatLoggerProvider : ILoggerProvider
                 WriteProperty(factory, category, props[i].Key, props[i].Value);
             }
         }
+    }
+
+    JsonEncodedText CacheText(string value)
+    {
+        return textCache.TryGetValue(value, out var bytes) ? bytes : textCache[value] = JsonEncodedText.Encode(value);
     }
 }
