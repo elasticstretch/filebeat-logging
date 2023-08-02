@@ -37,7 +37,7 @@ public class FilebeatLoggerProvider : ILoggerProvider
     /// <inheritdoc/>
     public virtual ILogger CreateLogger(string categoryName)
     {
-        throw new NotImplementedException();
+        return new FilebeatLogger(this, categoryName);
     }
 
     /// <inheritdoc/>
@@ -253,5 +253,38 @@ public class FilebeatLoggerProvider : ILoggerProvider
     JsonEncodedText CacheText(string value)
     {
         return textCache.TryGetValue(value, out var bytes) ? bytes : textCache[value] = JsonEncodedText.Encode(value);
+    }
+
+    sealed class FilebeatLogger : ILogger
+    {
+        private readonly FilebeatLoggerProvider provider;
+        private readonly string category;
+
+        public FilebeatLogger(FilebeatLoggerProvider provider, string category)
+        {
+            this.provider = provider;
+            this.category = category;
+        }
+
+        public bool IsEnabled(LogLevel logLevel)
+        {
+            return true;
+        }
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull
+        {
+            throw new NotImplementedException();
+        }
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            throw new NotImplementedException();
+        }
     }
 }
