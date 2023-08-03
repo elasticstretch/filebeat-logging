@@ -11,9 +11,13 @@ using Microsoft.Extensions.Options;
 /// Log entries are documents satisfying the Elastic Common Schema, written to the filesystem as UTF-8 newline-delimited JSON.
 /// </remarks>
 [ProviderAlias("Filebeat")]
-public class FilebeatLoggerProvider : ILoggerProvider
+public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
 {
     readonly IOptions<FileLoggingOptions> fileOptions;
+    readonly object sync = new();
+    readonly TaskCompletionSource completion = new();
+
+    bool flushing, stopping;
 
     /// <summary>
     /// Initializes the provider.
@@ -28,6 +32,14 @@ public class FilebeatLoggerProvider : ILoggerProvider
     public virtual ILogger CreateLogger(string categoryName)
     {
         return new FilebeatLogger(this, categoryName);
+    }
+
+    /// <inheritdoc/>
+    public async ValueTask DisposeAsync()
+    {
+        await DisposeAsyncCore().ConfigureAwait(false);
+        Dispose(disposing: false);
+        GC.SuppressFinalize(this);
     }
 
     /// <inheritdoc/>
@@ -139,6 +151,15 @@ public class FilebeatLoggerProvider : ILoggerProvider
     }
 
     /// <summary>
+    /// Disposes the instance asynchronously.
+    /// </summary>
+    /// <returns>A task for the dispose operation.</returns>
+    protected virtual ValueTask DisposeAsyncCore()
+    {
+        return TryComplete() ? default : new(completion.Task);
+    }
+
+    /// <summary>
     /// Disposes and/or finalizes the instance.
     /// </summary>
     /// <param name="disposing">
@@ -146,6 +167,10 @@ public class FilebeatLoggerProvider : ILoggerProvider
     /// </param>
     protected virtual void Dispose(bool disposing)
     {
+        if (disposing && !TryComplete())
+        {
+            completion.Task.Wait();
+        }
     }
 
     void WriteExceptions(ElasticFieldFactory factory, Exception? exception)
@@ -162,6 +187,25 @@ public class FilebeatLoggerProvider : ILoggerProvider
             WriteException(factory, exception);
             WriteExceptions(factory, exception.InnerException);
         }
+    }
+
+    bool TryComplete()
+    {
+        bool finish;
+
+        lock (sync)
+        {
+            finish = !stopping && !flushing;
+            stopping = true;
+        }
+
+        if (finish)
+        {
+            completion.SetResult();
+            return true;
+        }
+
+        return false;
     }
 
     sealed class FilebeatLogger : ILogger
