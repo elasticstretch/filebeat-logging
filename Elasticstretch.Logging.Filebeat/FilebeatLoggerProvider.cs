@@ -3,8 +3,6 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
-using System.Collections.Concurrent;
-using System.Text.Json;
 
 /// <summary>
 /// A provider of loggers for use with Filebeat.
@@ -15,22 +13,14 @@ using System.Text.Json;
 [ProviderAlias("Filebeat")]
 public class FilebeatLoggerProvider : ILoggerProvider
 {
-    readonly IOptions<ElasticLoggingOptions> elasticOptions;
     readonly IOptions<FileLoggingOptions> fileOptions;
-
-    readonly ConcurrentDictionary<string, JsonEncodedText> textCache = new();
-    readonly ConcurrentDictionary<string, ElasticLogPropertyOptions> categoryOptions = new();
 
     /// <summary>
     /// Initializes the provider.
     /// </summary>
-    /// <param name="elasticOptions">The Elastic logging options.</param>
     /// <param name="fileOptions">The file logging options.</param>
-    public FilebeatLoggerProvider(
-        IOptions<ElasticLoggingOptions> elasticOptions,
-        IOptions<FileLoggingOptions> fileOptions)
+    public FilebeatLoggerProvider(IOptions<FileLoggingOptions> fileOptions)
     {
-        this.elasticOptions = elasticOptions;
         this.fileOptions = fileOptions;
     }
 
@@ -54,7 +44,7 @@ public class FilebeatLoggerProvider : ILoggerProvider
     protected virtual void WriteStatic(ElasticFieldFactory factory)
     {
         ArgumentNullException.ThrowIfNull(factory, nameof(factory));
-        factory("ecs.version").WriteStringValue(CacheText("8.9.0"));
+        factory("ecs.version").WriteStringValue("8.9.0");
     }
 
     /// <summary>
@@ -67,10 +57,6 @@ public class FilebeatLoggerProvider : ILoggerProvider
     protected virtual void WriteScope<TState>(ElasticFieldFactory factory, string category, TState state)
         where TState : notnull
     {
-        ArgumentNullException.ThrowIfNull(factory, nameof(factory));
-        ArgumentNullException.ThrowIfNull(category, nameof(category));
-        ArgumentNullException.ThrowIfNull(state, nameof(state));
-        WriteState(factory, category, state);
     }
 
     /// <summary>
@@ -89,11 +75,8 @@ public class FilebeatLoggerProvider : ILoggerProvider
         var logField = factory("log");
 
         logField.WriteStartObject();
-        logField.WriteString(CacheText("logger"), CacheText(entry.Category));
-
-        logField.WritePropertyName(CacheText("level"));
-        JsonSerializer.Serialize(logField, entry.LogLevel, elasticOptions.Value.Json);
-
+        logField.WriteString("logger", entry.Category);
+        logField.WriteNumber("level", (int)entry.LogLevel);
         logField.WriteEndObject();
 
         if (entry.EventId != default)
@@ -101,18 +84,17 @@ public class FilebeatLoggerProvider : ILoggerProvider
             var eventField = factory("event");
 
             eventField.WriteStartObject();
-            eventField.WriteNumber(CacheText("code"), entry.EventId.Id);
+            eventField.WriteNumber("code", entry.EventId.Id);
 
             if (entry.EventId.Name != null)
             {
-                eventField.WriteString(CacheText("action"), entry.EventId.Name);
+                eventField.WriteString("action", entry.EventId.Name);
             }
 
             eventField.WriteEndObject();
         }
 
         WriteExceptions(factory, entry.Exception);
-        WriteState(factory, entry.Category, entry.State);
     }
 
     /// <summary>
@@ -131,14 +113,12 @@ public class FilebeatLoggerProvider : ILoggerProvider
         var errorField = factory("error");
 
         errorField.WriteStartObject();
-        errorField.WriteString(CacheText("message"), exception.Message);
-
-        errorField.WritePropertyName(CacheText("type"));
-        JsonSerializer.Serialize(errorField, exception, elasticOptions.Value.Json);
+        errorField.WriteString("message", exception.Message);
+        errorField.WriteString("type", exception.GetType().ToString());
 
         if (exception.StackTrace != null)
         {
-            errorField.WriteString(CacheText("stack_trace"), exception.StackTrace);
+            errorField.WriteString("stack_trace", exception.StackTrace);
         }
 
         errorField.WriteEndObject();
@@ -156,34 +136,6 @@ public class FilebeatLoggerProvider : ILoggerProvider
     /// <param name="value">The log property value.</param>
     protected virtual void WriteProperty(ElasticFieldFactory factory, string category, string name, object? value)
     {
-        ArgumentNullException.ThrowIfNull(factory, nameof(factory));
-        ArgumentNullException.ThrowIfNull(category, nameof(category));
-        ArgumentNullException.ThrowIfNull(name, nameof(name));
-
-        if (!categoryOptions.TryGetValue(category, out var opts))
-        {
-            opts = elasticOptions.Value;
-
-            foreach (var kvp in elasticOptions.Value.Categories)
-            {
-                if (CategoryMatch(kvp.Key, category))
-                {
-                    opts = kvp.Value;
-                    break;
-                }
-            }
-
-            categoryOptions[category] = opts;
-        }
-
-        if (opts.Mappings.TryGetValue(name, out var field))
-        {
-            JsonSerializer.Serialize(factory(field), value, elasticOptions.Value.Json);
-        }
-        else if (opts.IncludeOthers && name != "{OriginalFormat}")
-        {
-            JsonSerializer.Serialize(factory(name), value, elasticOptions.Value.Json);
-        }
     }
 
     /// <summary>
@@ -194,33 +146,6 @@ public class FilebeatLoggerProvider : ILoggerProvider
     /// </param>
     protected virtual void Dispose(bool disposing)
     {
-    }
-
-    // Use same prefix/wildcard matching as logger factory.
-    static bool CategoryMatch(string pattern, string category)
-    {
-        const char WildcardChar = '*';
-        int wildcardIndex = pattern.IndexOf(WildcardChar, StringComparison.Ordinal);
-
-        if (wildcardIndex != -1 && pattern.IndexOf(WildcardChar, wildcardIndex + 1) != -1)
-        {
-            throw new InvalidOperationException("Only one wildcard character is allowed in category name.");
-        }
-
-        ReadOnlySpan<char> prefix, suffix;
-        if (wildcardIndex == -1)
-        {
-            prefix = pattern.AsSpan();
-            suffix = default;
-        }
-        else
-        {
-            prefix = pattern.AsSpan(0, wildcardIndex);
-            suffix = pattern.AsSpan(wildcardIndex + 1);
-        }
-
-        return category.AsSpan().StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
-            category.AsSpan().EndsWith(suffix, StringComparison.OrdinalIgnoreCase);
     }
 
     void WriteExceptions(ElasticFieldFactory factory, Exception? exception)
@@ -237,22 +162,6 @@ public class FilebeatLoggerProvider : ILoggerProvider
             WriteException(factory, exception);
             WriteExceptions(factory, exception.InnerException);
         }
-    }
-
-    void WriteState<T>(ElasticFieldFactory factory, string category, T state)
-    {
-        if (state is IReadOnlyList<KeyValuePair<string, object?>> props)
-        {
-            for (var i = 0; i < props.Count; i++)
-            {
-                WriteProperty(factory, category, props[i].Key, props[i].Value);
-            }
-        }
-    }
-
-    JsonEncodedText CacheText(string value)
-    {
-        return textCache.TryGetValue(value, out var bytes) ? bytes : textCache[value] = JsonEncodedText.Encode(value);
     }
 
     sealed class FilebeatLogger : ILogger
