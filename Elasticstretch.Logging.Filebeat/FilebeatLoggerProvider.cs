@@ -3,6 +3,8 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using System.Buffers;
+using System.Text.Json;
 
 /// <summary>
 /// A provider of loggers for use with Filebeat.
@@ -237,7 +239,39 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
             Exception? exception,
             Func<TState, Exception?, string> formatter)
         {
+            var entry = new Dictionary<string, ElasticField>();
+
+            provider.WriteEntry<TState>(
+                name =>
+                {
+                    if (!entry.TryGetValue(name, out var field))
+                    {
+                        field = entry[name] = new();
+                    }
+
+                    return field.Writer;
+                },
+                new(logLevel, category, eventId, state, exception, formatter));
+
+            var size = entry.Values.Sum(x => x.Size);
+
             throw new NotImplementedException();
         }
+    }
+
+    readonly struct ElasticField
+    {
+        readonly ArrayBufferWriter<byte> data = new();
+
+        public ElasticField()
+        {
+            Writer = new(data);
+        }
+
+        public Utf8JsonWriter Writer { get; }
+
+        public int Size => data.WrittenCount;
+
+        public ReadOnlySpan<byte> Data => data.WrittenSpan;
     }
 }
