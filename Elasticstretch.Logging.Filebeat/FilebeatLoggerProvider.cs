@@ -1,10 +1,17 @@
 ﻿namespace Elasticstretch.Logging.Filebeat;
 
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+
 using System.Buffers;
+using System.Collections.Concurrent;
+using System.Globalization;
+using System.Reflection;
+using System.Text;
 using System.Text.Json;
+using System.Threading.Tasks.Dataflow;
 
 /// <summary>
 /// A provider of loggers for use with Filebeat.
@@ -15,25 +22,68 @@ using System.Text.Json;
 [ProviderAlias("Filebeat")]
 public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
 {
-    readonly IOptions<FileLoggingOptions> fileOptions;
-    readonly object sync = new();
-    readonly TaskCompletionSource completion = new();
+    static readonly byte[] Delimiter = Encoding.UTF8.GetBytes(Environment.NewLine);
+    static readonly JsonEncodedText EcsVersion = JsonEncodedText.Encode(ElasticSchema.Version);
 
-    bool flushing, stopping;
+    // Use same fallback as Host
+    // https://github.com/dotnet/runtime/blob/7a0b4f99a3e90d24e152e5e077839971e7678cfd/src/libraries/Microsoft.Extensions.Hosting/src/HostBuilder.cs#L240
+    static readonly string FallbackAppName = Assembly.GetEntryAssembly()?.GetName()?.Name ?? "dotnet";
+
+    static readonly FileStreamOptions StreamOptions =
+        new()
+        {
+            Mode = FileMode.Append,
+            Access = FileAccess.Write,
+            Share = FileShare.None,
+            Options = FileOptions.Asynchronous | FileOptions.WriteThrough,
+            BufferSize = 0,
+        };
+
+    readonly IOptionsMonitor<FileLoggingOptions> fileOptions;
+    readonly IHostEnvironment? environment;
+
+    readonly BufferBlock<IElasticEntry> buffer = new();
+    readonly AsyncLocal<ConcurrentDictionary<IElasticEntry, byte>> scopes = new();
+
+    Task? flushing;
 
     /// <summary>
     /// Initializes the provider.
     /// </summary>
     /// <param name="fileOptions">The file logging options.</param>
-    public FilebeatLoggerProvider(IOptions<FileLoggingOptions> fileOptions)
+    /// <param name="environment">The host environment, if any.</param>
+    public FilebeatLoggerProvider(IOptionsMonitor<FileLoggingOptions> fileOptions, IHostEnvironment? environment = null)
     {
         this.fileOptions = fileOptions;
+        this.environment = environment;
     }
 
     /// <inheritdoc/>
     public virtual ILogger CreateLogger(string categoryName)
     {
-        return new FilebeatLogger(this, categoryName);
+        lock (buffer)
+        {
+            if (buffer.Completion.IsCompleted)
+            {
+                throw GetException();
+            }
+
+            if (flushing == null)
+            {
+                flushing = SerializeLoopAsync();
+
+                flushing.ContinueWith(
+                    x => ((IDataflowBlock)buffer).Fault(x.Exception!),
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted,
+                    TaskScheduler.Default);
+            }
+        }
+
+        var fields = new ElasticEntry();
+        WriteStatic(fields, categoryName);
+
+        return new FilebeatLogger(this, categoryName, fields);
     }
 
     /// <inheritdoc/>
@@ -54,21 +104,24 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
     /// <summary>
     /// Writes static document fields for all log entries.
     /// </summary>
-    /// <param name="factory">The Elastic field factory.</param>
-    protected virtual void WriteStatic(ElasticFieldFactory factory)
+    /// <param name="writer">The field writer.</param>
+    /// <param name="category">The log category name.</param>
+    protected virtual void WriteStatic(IElasticFieldWriter writer, string category)
     {
-        ArgumentNullException.ThrowIfNull(factory, nameof(factory));
-        factory("ecs.version").WriteStringValue("8.9.0");
+        ArgumentNullException.ThrowIfNull(writer, nameof(writer));
+
+        writer.Begin(ElasticSchema.Fields.LogLogger).WriteStringValue(category);
+        writer.Begin(ElasticSchema.Fields.EcsVersion).WriteStringValue(EcsVersion);
     }
 
     /// <summary>
     /// Writes document fields for a log scope.
     /// </summary>
     /// <typeparam name="TState">The scope state type.</typeparam>
-    /// <param name="factory">The Elastic field factory.</param>
+    /// <param name="writer">The field writer.</param>
     /// <param name="category">The log category name.</param>
     /// <param name="state">The log scope state.</param>
-    protected virtual void WriteScope<TState>(ElasticFieldFactory factory, string category, TState state)
+    protected virtual void WriteScope<TState>(IElasticFieldWriter writer, string category, TState state)
         where TState : notnull
     {
     }
@@ -77,38 +130,32 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
     /// Writes document fields for a log entry.
     /// </summary>
     /// <typeparam name="TState">The entry state type.</typeparam>
-    /// <param name="factory">The Elastic field factory.</param>
+    /// <param name="writer">The field writer.</param>
     /// <param name="entry">The log entry.</param>
-    protected virtual void WriteEntry<TState>(ElasticFieldFactory factory, in LogEntry<TState> entry)
+    protected virtual void WriteEntry<TState>(IElasticFieldWriter writer, in LogEntry<TState> entry)
     {
-        ArgumentNullException.ThrowIfNull(factory, nameof(factory));
+        ArgumentNullException.ThrowIfNull(writer, nameof(writer));
 
-        factory("@timestamp").WriteStringValue(DateTimeOffset.Now);
-        factory("message").WriteStringValue(entry.Formatter(entry.State, entry.Exception));
-
-        var logField = factory("log");
-
-        logField.WriteStartObject();
-        logField.WriteString("logger", entry.Category);
-        logField.WriteNumber("level", (int)entry.LogLevel);
-        logField.WriteEndObject();
+        writer.Begin(ElasticSchema.Fields.Timestamp).WriteStringValue(DateTimeOffset.Now);
+        writer.Begin(ElasticSchema.Fields.LogLevel).WriteNumberValue((int)entry.LogLevel);
+        writer.Begin(ElasticSchema.Fields.Message).WriteStringValue(entry.Formatter(entry.State, entry.Exception));
 
         if (entry.EventId != default)
         {
-            var eventField = factory("event");
+            var eventField = writer.Begin(ElasticSchema.Fields.Event);
 
             eventField.WriteStartObject();
-            eventField.WriteNumber("code", entry.EventId.Id);
+            eventField.WriteNumber(ElasticSchema.Fields.Code, entry.EventId.Id);
 
             if (entry.EventId.Name != null)
             {
-                eventField.WriteString("action", entry.EventId.Name);
+                eventField.WriteString(ElasticSchema.Fields.Action, entry.EventId.Name);
             }
 
             eventField.WriteEndObject();
         }
 
-        WriteExceptions(factory, entry.Exception);
+        WriteExceptions(writer, entry.Exception);
     }
 
     /// <summary>
@@ -117,22 +164,22 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
     /// <remarks>
     /// Applies to each exception included in a log entry, including inner exceptions.
     /// </remarks>
-    /// <param name="factory">The Elastic field factory.</param>
+    /// <param name="writer">The field writer.</param>
     /// <param name="exception">The logged exception.</param>
-    protected virtual void WriteException(ElasticFieldFactory factory, Exception exception)
+    protected virtual void WriteException(IElasticFieldWriter writer, Exception exception)
     {
-        ArgumentNullException.ThrowIfNull(factory, nameof(factory));
+        ArgumentNullException.ThrowIfNull(writer, nameof(writer));
         ArgumentNullException.ThrowIfNull(exception, nameof(exception));
 
-        var errorField = factory("error");
+        var errorField = writer.Begin(ElasticSchema.Fields.Error);
 
         errorField.WriteStartObject();
-        errorField.WriteString("message", exception.Message);
-        errorField.WriteString("type", exception.GetType().ToString());
+        errorField.WriteString(ElasticSchema.Fields.Message, exception.Message);
+        errorField.WriteString(ElasticSchema.Fields.Type, exception.GetType().ToString());
 
         if (exception.StackTrace != null)
         {
-            errorField.WriteString("stack_trace", exception.StackTrace);
+            errorField.WriteString(ElasticSchema.Fields.StackTrace, exception.StackTrace);
         }
 
         errorField.WriteEndObject();
@@ -142,14 +189,42 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
     /// Writes document fields for a log property.
     /// </summary>
     /// <remarks>
-    /// Applies to log entry and scope state implementing <see cref="IReadOnlyList{T}"/> of <see cref="KeyValuePair{TKey, TValue}"/> of <see cref="string"/> and <see cref="object"/> (e.g. message template arguments).
+    /// Applies to log entry and scope state implementing <see cref="IReadOnlyList{T}"/>
+    /// of <see cref="KeyValuePair{TKey, TValue}"/> of <see cref="string"/> and <see cref="object"/>
+    /// (e.g. message template arguments).
     /// </remarks>
-    /// <param name="factory">The Elastic field factory.</param>
+    /// <param name="writer">The field writer.</param>
     /// <param name="category">The log category name.</param>
     /// <param name="name">The log property name.</param>
     /// <param name="value">The log property value.</param>
-    protected virtual void WriteProperty(ElasticFieldFactory factory, string category, string name, object? value)
+    protected virtual void WriteProperty(IElasticFieldWriter writer, string category, string name, object? value)
     {
+    }
+
+    /// <summary>
+    /// Saves buffered log data to the filesystem.
+    /// </summary>
+    /// <remarks>
+    /// Handles <see cref="IOException"/> by writing to <see cref="Console.Error"/>.
+    /// Override to implement different behavior.
+    /// </remarks>
+    /// <param name="path">The path to the output log file.</param>
+    /// <param name="data">The log data.</param>
+    /// <returns>A task for the save operation.</returns>
+    protected virtual async Task SaveAsync(string path, ReadOnlyMemory<byte> data)
+    {
+        ArgumentNullException.ThrowIfNull(path, nameof(path));
+        using var file = File.Open(path, StreamOptions);
+
+        try
+        {
+            await file.WriteAsync(data).ConfigureAwait(false);
+        }
+        catch (IOException exception)
+        {
+            // File might be locked by another process.
+            await Console.Error.WriteLineAsync($"Error flushing logs: {exception}").ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -158,7 +233,12 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
     /// <returns>A task for the dispose operation.</returns>
     protected virtual ValueTask DisposeAsyncCore()
     {
-        return TryComplete() ? default : new(completion.Task);
+        lock (buffer)
+        {
+            buffer.Complete();
+        }
+
+        return flushing != null ? new(flushing) : default;
     }
 
     /// <summary>
@@ -169,56 +249,119 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
     /// </param>
     protected virtual void Dispose(bool disposing)
     {
-        if (disposing && !TryComplete())
+        if (disposing)
         {
-            completion.Task.Wait();
+            lock (buffer)
+            {
+                buffer.Complete();
+            }
+
+            flushing?.Wait();
         }
     }
 
-    void WriteExceptions(ElasticFieldFactory factory, Exception? exception)
+    void WriteExceptions(IElasticFieldWriter writer, Exception? exception)
     {
         if (exception is AggregateException aggregate)
         {
             foreach (var inner in aggregate.InnerExceptions)
             {
-                WriteExceptions(factory, inner);
+                WriteExceptions(writer, inner);
             }
         }
         else if (exception != null)
         {
-            WriteException(factory, exception);
-            WriteExceptions(factory, exception.InnerException);
+            WriteException(writer, exception);
+            WriteExceptions(writer, exception.InnerException);
         }
     }
 
-    bool TryComplete()
+    async Task SerializeLoopAsync()
     {
-        bool finish;
+        var formatArgs = environment != null
+            ? new object[] { environment.ApplicationName, environment.EnvironmentName }
+            : new object[] { FallbackAppName, "Production" };
 
-        lock (sync)
+        var output = new ArrayBufferWriter<byte>();
+        using var writer = new Utf8JsonWriter(output);
+
+        while (await buffer.OutputAvailableAsync(CancellationToken.None).ConfigureAwait(false))
         {
-            finish = !stopping && !flushing;
-            stopping = true;
+            var opts = fileOptions.CurrentValue;
+
+            using (var cancellation = new CancellationTokenSource(opts.BufferInterval))
+            {
+                Serialize(buffer, writer);
+
+                while (output.WrittenCount < opts.BufferSize && !cancellation.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await buffer.OutputAvailableAsync(cancellation.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                    }
+
+                    Serialize(buffer, writer);
+                }
+            }
+
+            var path = Path.Combine(
+                AppContext.BaseDirectory,
+                string.Format(CultureInfo.InvariantCulture, opts.Path, formatArgs));
+
+            await SaveAsync(path, output.WrittenMemory).ConfigureAwait(false);
         }
 
-        if (finish)
+        static void Serialize(IReceivableSourceBlock<IElasticEntry> entries, Utf8JsonWriter writer)
         {
-            completion.SetResult();
-            return true;
+            while (entries.TryReceive(out var entry))
+            {
+                writer.WriteStartObject();
+
+                for (var i = 0; i < entry.FieldCount; i++)
+                {
+                    var fields = entry.GetFields(0, out var name);
+
+                    writer.WritePropertyName(name);
+                    writer.WriteStartArray();
+
+                    for (var j = 0; j < fields.Count; j++)
+                    {
+                        fields[j].CopyTo(writer);
+                    }
+
+                    writer.WriteEndArray();
+                }
+
+                writer.WriteEndObject();
+                writer.WriteRawValue(Delimiter, skipInputValidation: true);
+            }
+        }
+    }
+
+    Exception GetException()
+    {
+        if (buffer.Completion.Exception != null)
+        {
+            return buffer.Completion.Exception.GetBaseException();
         }
 
-        return false;
+        return new ObjectDisposedException(GetType().FullName);
     }
 
     sealed class FilebeatLogger : ILogger
     {
-        private readonly FilebeatLoggerProvider provider;
-        private readonly string category;
+        readonly FilebeatLoggerProvider provider;
+        readonly string category;
+        readonly IElasticEntry fields;
 
-        public FilebeatLogger(FilebeatLoggerProvider provider, string category)
+        public FilebeatLogger(FilebeatLoggerProvider provider, string category, IElasticEntry fields)
         {
             this.provider = provider;
             this.category = category;
+            this.fields = fields;
         }
 
         public bool IsEnabled(LogLevel logLevel)
@@ -229,7 +372,18 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
         public IDisposable? BeginScope<TState>(TState state)
             where TState : notnull
         {
-            throw new NotImplementedException();
+            var entry = new ElasticEntry();
+            provider.WriteScope(entry, category, state);
+
+            if (entry.FieldCount > 0)
+            {
+                var scope = provider.scopes.Value ??= new();
+                scope.TryAdd(entry, default);
+
+                return new ElasticScope(scope, entry);
+            }
+
+            return null;
         }
 
         public void Log<TState>(
@@ -239,39 +393,53 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
             Exception? exception,
             Func<TState, Exception?, string> formatter)
         {
-            var entry = new Dictionary<string, ElasticField>();
+            var entry = new ElasticEntry();
+            provider.WriteEntry<TState>(entry, new(logLevel, category, eventId, state, exception, formatter));
 
-            provider.WriteEntry<TState>(
-                name =>
+            CopyEntry(fields, entry);
+
+            if (provider.scopes.Value != null)
+            {
+                foreach (var scope in provider.scopes.Value.Keys)
                 {
-                    if (!entry.TryGetValue(name, out var field))
-                    {
-                        field = entry[name] = new();
-                    }
+                    CopyEntry(scope, entry);
+                }
+            }
 
-                    return field.Writer;
-                },
-                new(logLevel, category, eventId, state, exception, formatter));
+            if (entry.FieldCount > 0 && !provider.buffer.Post(entry))
+            {
+                throw provider.GetException();
+            }
+        }
 
-            var size = entry.Values.Sum(x => x.Size);
+        static void CopyEntry(IElasticEntry source, IElasticEntry target)
+        {
+            for (var i = 0; i < source.FieldCount; i++)
+            {
+                var fields = source.GetFields(i, out var name);
 
-            throw new NotImplementedException();
+                for (var j = 0; j < fields.Count; j++)
+                {
+                    target.Add(name, fields[j]);
+                }
+            }
         }
     }
 
-    readonly struct ElasticField
+    sealed class ElasticScope : IDisposable
     {
-        readonly ArrayBufferWriter<byte> data = new();
+        readonly IDictionary<IElasticEntry, byte> entries;
+        readonly IElasticEntry entry;
 
-        public ElasticField()
+        public ElasticScope(IDictionary<IElasticEntry, byte> entries, IElasticEntry entry)
         {
-            Writer = new(data);
+            this.entries = entries;
+            this.entry = entry;
         }
 
-        public Utf8JsonWriter Writer { get; }
-
-        public int Size => data.WrittenCount;
-
-        public ReadOnlySpan<byte> Data => data.WrittenSpan;
+        public void Dispose()
+        {
+            entries.Remove(entry);
+        }
     }
 }
