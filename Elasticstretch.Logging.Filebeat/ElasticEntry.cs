@@ -38,7 +38,7 @@ sealed class ElasticEntry : IElasticEntry
 
         public IBufferWriter<byte> Writer => buffer;
 
-        public void CopyTo(Utf8JsonWriter writer)
+        public void WriteTo(Utf8JsonWriter writer)
         {
             writer.WriteRawValue(buffer.WrittenSpan, skipInputValidation: true);
         }

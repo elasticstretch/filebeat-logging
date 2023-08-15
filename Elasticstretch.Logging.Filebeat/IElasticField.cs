@@ -4,5 +4,5 @@ using System.Text.Json;
 
 interface IElasticField
 {
-    void CopyTo(Utf8JsonWriter writer);
+    void WriteTo(Utf8JsonWriter writer);
 }

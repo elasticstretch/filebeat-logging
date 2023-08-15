@@ -6,7 +6,6 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
 using System.Buffers;
-using System.Collections.Concurrent;
 using System.Globalization;
 using System.Reflection;
 using System.Text;
@@ -41,10 +40,9 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
 
     readonly IOptionsMonitor<FileLoggingOptions> fileOptions;
     readonly IHostEnvironment? environment;
-
     readonly BufferBlock<IElasticEntry> buffer = new();
-    readonly AsyncLocal<ConcurrentDictionary<IElasticEntry, byte>> scopes = new();
 
+    IElasticLocal? scopes;
     Task? flushing;
 
     /// <summary>
@@ -80,7 +78,7 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
             }
         }
 
-        var fields = new ElasticEntry();
+        var fields = CreateEntry();
         WriteStatic(fields, categoryName);
 
         return new FilebeatLogger(this, categoryName, fields);
@@ -260,6 +258,16 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
         }
     }
 
+    private protected virtual IElasticEntry CreateEntry()
+    {
+        return new ElasticEntry();
+    }
+
+    private protected virtual IElasticLocal CreateLocal()
+    {
+        return new ElasticLocal();
+    }
+
     void WriteExceptions(IElasticFieldWriter writer, Exception? exception)
     {
         if (exception is AggregateException aggregate)
@@ -329,7 +337,7 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
 
                     for (var j = 0; j < fields.Count; j++)
                     {
-                        fields[j].CopyTo(writer);
+                        fields[j].WriteTo(writer);
                     }
 
                     writer.WriteEndArray();
@@ -372,18 +380,11 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
         public IDisposable? BeginScope<TState>(TState state)
             where TState : notnull
         {
-            var entry = new ElasticEntry();
+            var entry = provider.CreateEntry();
             provider.WriteScope(entry, category, state);
 
-            if (entry.FieldCount > 0)
-            {
-                var scope = provider.scopes.Value ??= new();
-                scope.TryAdd(entry, default);
-
-                return new ElasticScope(scope, entry);
-            }
-
-            return null;
+            provider.scopes ??= provider.CreateLocal();
+            return entry.FieldCount > 0 ? provider.scopes.Add(entry) : null;
         }
 
         public void Log<TState>(
@@ -393,18 +394,19 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
             Exception? exception,
             Func<TState, Exception?, string> formatter)
         {
-            var entry = new ElasticEntry();
-            provider.WriteEntry<TState>(entry, new(logLevel, category, eventId, state, exception, formatter));
+            var entry = provider.CreateEntry();
 
             CopyEntry(fields, entry);
 
-            if (provider.scopes.Value != null)
+            if (provider.scopes != null)
             {
-                foreach (var scope in provider.scopes.Value.Keys)
+                for (var i = 0; i < provider.scopes.Count; i++)
                 {
-                    CopyEntry(scope, entry);
+                    CopyEntry(provider.scopes[i], entry);
                 }
             }
+
+            provider.WriteEntry<TState>(entry, new(logLevel, category, eventId, state, exception, formatter));
 
             if (entry.FieldCount > 0 && !provider.buffer.Post(entry))
             {
@@ -423,23 +425,6 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
                     target.Add(name, fields[j]);
                 }
             }
-        }
-    }
-
-    sealed class ElasticScope : IDisposable
-    {
-        readonly IDictionary<IElasticEntry, byte> entries;
-        readonly IElasticEntry entry;
-
-        public ElasticScope(IDictionary<IElasticEntry, byte> entries, IElasticEntry entry)
-        {
-            this.entries = entries;
-            this.entry = entry;
-        }
-
-        public void Dispose()
-        {
-            entries.Remove(entry);
         }
     }
 }
