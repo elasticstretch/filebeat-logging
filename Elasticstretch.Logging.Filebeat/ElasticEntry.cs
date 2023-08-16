@@ -5,31 +5,51 @@ using System.Text.Json;
 
 sealed class ElasticEntry : IElasticEntry
 {
-    readonly SortedList<JsonEncodedText, List<IElasticField>> fields = new();
+    readonly SortedList<JsonEncodedText, List<IElasticField>> list = new();
 
-    public int FieldCount => fields.Count;
+    public int FieldCount => list.Count;
 
     public Utf8JsonWriter Begin(JsonEncodedText name)
     {
         var field = new ElasticField();
-        Add(name, field);
+        GetFields(name).Add(field);
+
         return new(field.Writer);
     }
 
-    public void Add(JsonEncodedText name, IElasticField field)
+    public void Merge(IElasticEntry other)
     {
-        if (!fields.TryGetValue(name, out var group))
+        for (var i = 0; i < other.FieldCount; i++)
         {
-            fields.Add(name, group = new());
-        }
+            var source = other.GetFields(i, out var name);
+            var target = GetFields(name);
 
-        group.Add(field);
+            for (var j = 0; j < source.Count; j++)
+            {
+                target.Add(source[j]);
+            }
+        }
     }
 
     public IReadOnlyList<IElasticField> GetFields(int index, out JsonEncodedText name)
     {
-        name = fields.Keys[index];
-        return fields[name];
+        if (index >= list.Count)
+        {
+            throw new ArgumentOutOfRangeException(nameof(index));
+        }
+
+        name = list.Keys[index];
+        return list[name];
+    }
+
+    List<IElasticField> GetFields(JsonEncodedText name)
+    {
+        if (!list.TryGetValue(name, out var group))
+        {
+            list.Add(name, group = new());
+        }
+
+        return group;
     }
 
     sealed class ElasticField : IElasticField

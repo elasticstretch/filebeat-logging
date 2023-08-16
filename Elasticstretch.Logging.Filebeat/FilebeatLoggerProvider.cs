@@ -396,13 +396,13 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
         {
             var entry = provider.CreateEntry();
 
-            CopyEntry(fields, entry);
+            entry.Merge(fields);
 
             if (provider.scopes != null)
             {
                 for (var i = 0; i < provider.scopes.Count; i++)
                 {
-                    CopyEntry(provider.scopes[i], entry);
+                    entry.Merge(provider.scopes[i]);
                 }
             }
 
@@ -411,19 +411,6 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
             if (entry.FieldCount > 0 && !provider.buffer.Post(entry))
             {
                 throw provider.GetException();
-            }
-        }
-
-        static void CopyEntry(IElasticEntry source, IElasticEntry target)
-        {
-            for (var i = 0; i < source.FieldCount; i++)
-            {
-                var fields = source.GetFields(i, out var name);
-
-                for (var j = 0; j < fields.Count; j++)
-                {
-                    target.Add(name, fields[j]);
-                }
             }
         }
     }

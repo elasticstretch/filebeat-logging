@@ -6,7 +6,7 @@ interface IElasticEntry : IElasticFieldWriter
 {
     int FieldCount { get; }
 
-    void Add(JsonEncodedText name, IElasticField field);
+    void Merge(IElasticEntry entry);
 
     IReadOnlyList<IElasticField> GetFields(int index, out JsonEncodedText name);
 }
