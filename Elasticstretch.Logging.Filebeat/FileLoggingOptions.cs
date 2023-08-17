@@ -9,9 +9,9 @@ public class FileLoggingOptions
     /// The path to the output log file.
     /// </summary>
     /// <remarks>
-    /// Supports application and environment as format items. Default is <c>{0}.{1}.log</c>.
+    /// Supports application and environment as format items. Default is <c>{0}.{1}.ndjson</c>.
     /// </remarks>
-    public string Path { get; set; } = "{0}.{1}.log";
+    public string Path { get; set; } = "{0}.{1}.ndjson";
 
     /// <summary>
     /// Gets or sets the maximum number of log bytes to store in memory.
