@@ -2,7 +2,7 @@
 
 using System.Text.Json;
 
-interface IElasticField
+interface IJsonLoggable
 {
-    void WriteTo(Utf8JsonWriter writer);
+    void Log(Utf8JsonWriter writer);
 }

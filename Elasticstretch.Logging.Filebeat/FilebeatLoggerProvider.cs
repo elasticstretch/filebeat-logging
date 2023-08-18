@@ -41,8 +41,8 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
     readonly IOptionsMonitor<FileLoggingOptions> fileOptions;
     readonly IHostEnvironment? environment;
 
-    readonly BufferBlock<IElasticEntry> buffer = new();
-    readonly LogLocal<IElasticEntry> scopes = new();
+    readonly BufferBlock<IJsonLoggable> buffer = new();
+    readonly LogLocal<ElasticEntry> scopes = new();
 
     Task? flushing;
 
@@ -79,7 +79,7 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
             }
         }
 
-        var fields = CreateEntry();
+        var fields = new ElasticEntry();
         WriteStatic(fields, categoryName);
 
         return new FilebeatLogger(this, categoryName, fields);
@@ -259,11 +259,6 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
         }
     }
 
-    private protected virtual IElasticEntry CreateEntry()
-    {
-        return new ElasticEntry();
-    }
-
     void WriteExceptions(IElasticFieldWriter writer, Exception? exception)
     {
         if (exception is AggregateException aggregate)
@@ -318,28 +313,11 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
             await SaveAsync(path, output.WrittenMemory).ConfigureAwait(false);
         }
 
-        static void Serialize(IReceivableSourceBlock<IElasticEntry> entries, Utf8JsonWriter writer)
+        static void Serialize(IReceivableSourceBlock<IJsonLoggable> entries, Utf8JsonWriter writer)
         {
             while (entries.TryReceive(out var entry))
             {
-                writer.WriteStartObject();
-
-                for (var i = 0; i < entry.FieldCount; i++)
-                {
-                    var fields = entry.GetFields(0, out var name);
-
-                    writer.WritePropertyName(name);
-                    writer.WriteStartArray();
-
-                    for (var j = 0; j < fields.Count; j++)
-                    {
-                        fields[j].WriteTo(writer);
-                    }
-
-                    writer.WriteEndArray();
-                }
-
-                writer.WriteEndObject();
+                entry.Log(writer);
                 writer.WriteRawValue(Delimiter, skipInputValidation: true);
             }
         }
@@ -359,9 +337,9 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
     {
         readonly FilebeatLoggerProvider provider;
         readonly string category;
-        readonly IElasticEntry fields;
+        readonly ElasticEntry fields;
 
-        public FilebeatLogger(FilebeatLoggerProvider provider, string category, IElasticEntry fields)
+        public FilebeatLogger(FilebeatLoggerProvider provider, string category, ElasticEntry fields)
         {
             this.provider = provider;
             this.category = category;
@@ -376,7 +354,7 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
         public IDisposable? BeginScope<TState>(TState state)
             where TState : notnull
         {
-            var entry = provider.CreateEntry();
+            var entry = new ElasticEntry();
             provider.WriteScope(entry, category, state);
             return entry.FieldCount > 0 ? provider.scopes.Add(entry) : null;
         }
@@ -388,7 +366,7 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
             Exception? exception,
             Func<TState, Exception?, string> formatter)
         {
-            var entry = provider.CreateEntry();
+            var entry = new ElasticEntry();
 
             entry.Merge(fields);
 

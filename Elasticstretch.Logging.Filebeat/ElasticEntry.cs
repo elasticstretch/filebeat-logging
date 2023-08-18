@@ -3,9 +3,9 @@
 using System.Buffers;
 using System.Text.Json;
 
-sealed class ElasticEntry : IElasticEntry
+sealed class ElasticEntry : IElasticFieldWriter, IJsonLoggable
 {
-    readonly SortedList<JsonEncodedText, List<IElasticField>> list = new();
+    readonly SortedList<JsonEncodedText, List<IJsonLoggable>> list = new();
 
     public int FieldCount => list.Count;
 
@@ -17,7 +17,7 @@ sealed class ElasticEntry : IElasticEntry
         return new(field.Writer);
     }
 
-    public void Merge(IElasticEntry other)
+    public void Merge(ElasticEntry other)
     {
         for (var i = 0; i < other.FieldCount; i++)
         {
@@ -31,7 +31,7 @@ sealed class ElasticEntry : IElasticEntry
         }
     }
 
-    public IReadOnlyList<IElasticField> GetFields(int index, out JsonEncodedText name)
+    public IReadOnlyList<IJsonLoggable> GetFields(int index, out JsonEncodedText name)
     {
         if (index >= list.Count)
         {
@@ -42,7 +42,29 @@ sealed class ElasticEntry : IElasticEntry
         return list[name];
     }
 
-    List<IElasticField> GetFields(JsonEncodedText name)
+    public void Log(Utf8JsonWriter writer)
+    {
+        writer.WriteStartObject();
+
+        for (var i = 0; i < FieldCount; i++)
+        {
+            var fields = GetFields(0, out var name);
+
+            writer.WritePropertyName(name);
+            writer.WriteStartArray();
+
+            for (var j = 0; j < fields.Count; j++)
+            {
+                fields[j].Log(writer);
+            }
+
+            writer.WriteEndArray();
+        }
+
+        writer.WriteEndObject();
+    }
+
+    List<IJsonLoggable> GetFields(JsonEncodedText name)
     {
         if (!list.TryGetValue(name, out var group))
         {
@@ -52,13 +74,13 @@ sealed class ElasticEntry : IElasticEntry
         return group;
     }
 
-    sealed class ElasticField : IElasticField
+    sealed class ElasticField : IJsonLoggable
     {
         readonly ArrayBufferWriter<byte> buffer = new();
 
         public IBufferWriter<byte> Writer => buffer;
 
-        public void WriteTo(Utf8JsonWriter writer)
+        public void Log(Utf8JsonWriter writer)
         {
             writer.WriteRawValue(buffer.WrittenSpan, skipInputValidation: true);
         }
