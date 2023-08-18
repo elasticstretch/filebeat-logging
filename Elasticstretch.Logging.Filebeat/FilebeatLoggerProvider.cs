@@ -40,9 +40,10 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
 
     readonly IOptionsMonitor<FileLoggingOptions> fileOptions;
     readonly IHostEnvironment? environment;
-    readonly BufferBlock<IElasticEntry> buffer = new();
 
-    IElasticLocal? scopes;
+    readonly BufferBlock<IElasticEntry> buffer = new();
+    readonly LogLocal<IElasticEntry> scopes = new();
+
     Task? flushing;
 
     /// <summary>
@@ -263,11 +264,6 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
         return new ElasticEntry();
     }
 
-    private protected virtual IElasticLocal CreateLocal()
-    {
-        return new ElasticLocal();
-    }
-
     void WriteExceptions(IElasticFieldWriter writer, Exception? exception)
     {
         if (exception is AggregateException aggregate)
@@ -382,8 +378,6 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
         {
             var entry = provider.CreateEntry();
             provider.WriteScope(entry, category, state);
-
-            provider.scopes ??= provider.CreateLocal();
             return entry.FieldCount > 0 ? provider.scopes.Add(entry) : null;
         }
 

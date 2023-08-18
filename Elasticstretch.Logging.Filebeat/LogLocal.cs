@@ -1,10 +1,10 @@
 ﻿namespace Elasticstretch.Logging.Filebeat;
 
-sealed class ElasticLocal : IElasticLocal
+sealed class LogLocal<TState>
 {
-    readonly AsyncLocal<List<IElasticEntry>> local = new();
+    readonly AsyncLocal<List<TState>> local = new();
 
-    public IElasticEntry this[int index]
+    public TState this[int index]
     {
         get
         {
@@ -19,7 +19,7 @@ sealed class ElasticLocal : IElasticLocal
 
     public int Count => local.Value != null ? local.Value.Count : 0;
 
-    public IDisposable Add(IElasticEntry entry)
+    public IDisposable Add(TState entry)
     {
         var list = local.Value ??= new();
         list.Add(entry);
@@ -29,12 +29,12 @@ sealed class ElasticLocal : IElasticLocal
 
     sealed class EntryRemover : IDisposable
     {
-        private readonly AsyncLocal<List<IElasticEntry>> local;
+        private readonly AsyncLocal<List<TState>> local;
         private readonly int index;
 
-        private IElasticEntry? entry;
+        private TState? entry;
 
-        public EntryRemover(AsyncLocal<List<IElasticEntry>> local, int index, IElasticEntry entry)
+        public EntryRemover(AsyncLocal<List<TState>> local, int index, TState entry)
         {
             this.local = local;
             this.index = index;
@@ -45,13 +45,13 @@ sealed class ElasticLocal : IElasticLocal
         {
             if (entry != null)
             {
-                if (local.Value == null || index >= local.Value.Count || local.Value[index] != entry)
+                if (local.Value == null || local.Value.IndexOf(entry) != index)
                 {
                     throw new InvalidOperationException("Local entry not found.");
                 }
 
                 local.Value.RemoveAt(index);
-                entry = null;
+                entry = default;
             }
         }
     }
