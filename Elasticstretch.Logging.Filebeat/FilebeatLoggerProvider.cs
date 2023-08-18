@@ -201,29 +201,14 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
     }
 
     /// <summary>
-    /// Saves buffered log data to the filesystem.
+    /// Initializes a stream to save log data to the filesystem.
     /// </summary>
-    /// <remarks>
-    /// Handles <see cref="IOException"/> by writing to <see cref="Console.Error"/>.
-    /// Override to implement different behavior.
-    /// </remarks>
     /// <param name="path">The path to the output log file.</param>
-    /// <param name="data">The log data.</param>
-    /// <returns>A task for the save operation.</returns>
-    protected virtual async Task SaveAsync(string path, ReadOnlyMemory<byte> data)
+    /// <param name="options">The file stream options.</param>
+    /// <returns>The file stream.</returns>
+    protected virtual Stream OpenFile(string path, FileStreamOptions options)
     {
-        ArgumentNullException.ThrowIfNull(path, nameof(path));
-        using var file = File.Open(path, StreamOptions);
-
-        try
-        {
-            await file.WriteAsync(data).ConfigureAwait(false);
-        }
-        catch (IOException exception)
-        {
-            // File might be locked by another process.
-            await Console.Error.WriteLineAsync($"Error flushing logs: {exception}").ConfigureAwait(false);
-        }
+        return File.Open(path, options);
     }
 
     /// <summary>
@@ -310,7 +295,17 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
                 AppContext.BaseDirectory,
                 string.Format(CultureInfo.InvariantCulture, opts.Path, formatArgs));
 
-            await SaveAsync(path, output.WrittenMemory).ConfigureAwait(false);
+            using var file = OpenFile(path, StreamOptions);
+
+            try
+            {
+                await file.WriteAsync(output.WrittenMemory).ConfigureAwait(false);
+            }
+            catch (IOException exception)
+            {
+                // File might be locked by another process.
+                await Console.Error.WriteLineAsync($"Error flushing logs: {exception}").ConfigureAwait(false);
+            }
         }
 
         static void Serialize(IReceivableSourceBlock<IJsonLoggable> entries, Utf8JsonWriter writer)
