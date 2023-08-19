@@ -109,8 +109,15 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(writer, nameof(writer));
 
-        writer.Begin(ElasticSchema.Fields.LogLogger).WriteStringValue(category);
-        writer.Begin(ElasticSchema.Fields.EcsVersion).WriteStringValue(EcsVersion);
+        using (var field = writer.Begin(ElasticSchema.Fields.LogLogger))
+        {
+            field.WriteStringValue(category);
+        }
+
+        using (var field = writer.Begin(ElasticSchema.Fields.EcsVersion))
+        {
+            field.WriteStringValue(EcsVersion);
+        }
     }
 
     /// <summary>
@@ -135,23 +142,34 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(writer, nameof(writer));
 
-        writer.Begin(ElasticSchema.Fields.Timestamp).WriteStringValue(DateTimeOffset.Now);
-        writer.Begin(ElasticSchema.Fields.LogLevel).WriteNumberValue((int)entry.LogLevel);
-        writer.Begin(ElasticSchema.Fields.Message).WriteStringValue(entry.Formatter(entry.State, entry.Exception));
+        using (var field = writer.Begin(ElasticSchema.Fields.Timestamp))
+        {
+            field.WriteStringValue(DateTimeOffset.UtcNow);
+        }
+
+        using (var field = writer.Begin(ElasticSchema.Fields.LogLevel))
+        {
+            field.WriteNumberValue((int)entry.LogLevel);
+        }
+
+        using (var field = writer.Begin(ElasticSchema.Fields.Message))
+        {
+            field.WriteStringValue(entry.Formatter(entry.State, entry.Exception));
+        }
 
         if (entry.EventId != default)
         {
-            var eventField = writer.Begin(ElasticSchema.Fields.Event);
+            using var field = writer.Begin(ElasticSchema.Fields.Event);
 
-            eventField.WriteStartObject();
-            eventField.WriteNumber(ElasticSchema.Fields.Code, entry.EventId.Id);
+            field.WriteStartObject();
+            field.WriteNumber(ElasticSchema.Fields.Code, entry.EventId.Id);
 
             if (entry.EventId.Name != null)
             {
-                eventField.WriteString(ElasticSchema.Fields.Action, entry.EventId.Name);
+                field.WriteString(ElasticSchema.Fields.Action, entry.EventId.Name);
             }
 
-            eventField.WriteEndObject();
+            field.WriteEndObject();
         }
 
         WriteExceptions(writer, entry.Exception);
@@ -170,18 +188,18 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
         ArgumentNullException.ThrowIfNull(writer, nameof(writer));
         ArgumentNullException.ThrowIfNull(exception, nameof(exception));
 
-        var errorField = writer.Begin(ElasticSchema.Fields.Error);
+        using var field = writer.Begin(ElasticSchema.Fields.Error);
 
-        errorField.WriteStartObject();
-        errorField.WriteString(ElasticSchema.Fields.Message, exception.Message);
-        errorField.WriteString(ElasticSchema.Fields.Type, exception.GetType().ToString());
+        field.WriteStartObject();
+        field.WriteString(ElasticSchema.Fields.Message, exception.Message);
+        field.WriteString(ElasticSchema.Fields.Type, exception.GetType().ToString());
 
         if (exception.StackTrace != null)
         {
-            errorField.WriteString(ElasticSchema.Fields.StackTrace, exception.StackTrace);
+            field.WriteString(ElasticSchema.Fields.StackTrace, exception.StackTrace);
         }
 
-        errorField.WriteEndObject();
+        field.WriteEndObject();
     }
 
     /// <summary>
