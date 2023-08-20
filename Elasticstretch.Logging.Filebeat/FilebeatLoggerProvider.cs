@@ -284,6 +284,8 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
                 while (active && output.WrittenCount < opts.BufferSize);
             }
 
+            writer.Flush();
+
             var path = Path.Combine(
                 AppContext.BaseDirectory,
                 string.Format(CultureInfo.InvariantCulture, opts.Path, formatArgs));
