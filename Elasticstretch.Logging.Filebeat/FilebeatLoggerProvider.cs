@@ -30,8 +30,8 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
         {
             Mode = FileMode.Append,
             Access = FileAccess.Write,
-            Share = FileShare.None,
-            Options = FileOptions.Asynchronous | FileOptions.WriteThrough,
+            Share = FileShare.ReadWrite,
+            Options = FileOptions.Asynchronous,
             BufferSize = 0,
         };
 
@@ -289,16 +289,7 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
                 string.Format(CultureInfo.InvariantCulture, opts.Path, formatArgs));
 
             using var file = OpenFile(path, StreamOptions);
-
-            try
-            {
-                await file.WriteAsync(output.WrittenMemory).ConfigureAwait(false);
-            }
-            catch (IOException exception)
-            {
-                // File might be locked by another process.
-                await Console.Error.WriteLineAsync($"Error flushing logs: {exception}").ConfigureAwait(false);
-            }
+            await file.WriteAsync(output.WrittenMemory).ConfigureAwait(false);
         }
     }
 
