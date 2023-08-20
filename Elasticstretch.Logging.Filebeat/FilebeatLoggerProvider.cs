@@ -8,9 +8,7 @@ using Microsoft.Extensions.Options;
 using System.Buffers;
 using System.Globalization;
 using System.Reflection;
-using System.Text;
 using System.Text.Json;
-using System.Threading.Tasks.Dataflow;
 
 /// <summary>
 /// A provider of loggers for use with Filebeat.
@@ -21,7 +19,6 @@ using System.Threading.Tasks.Dataflow;
 [ProviderAlias("Filebeat")]
 public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
 {
-    static readonly byte[] Delimiter = Encoding.UTF8.GetBytes(Environment.NewLine);
     static readonly JsonEncodedText EcsVersion = JsonEncodedText.Encode(ElasticSchema.Version);
 
     // Use same fallback as Host
@@ -41,7 +38,7 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
     readonly IOptionsMonitor<FileLoggingOptions> fileOptions;
     readonly IHostEnvironment? environment;
 
-    readonly BufferBlock<IJsonLoggable> buffer = new();
+    readonly LogSerializer serializer = new();
     readonly LogLocal<ElasticEntry> scopes = new();
 
     Task? flushing;
@@ -60,23 +57,9 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
     /// <inheritdoc/>
     public virtual ILogger CreateLogger(string categoryName)
     {
-        lock (buffer)
+        if (serializer.TryStart())
         {
-            if (buffer.Completion.IsCompleted)
-            {
-                throw GetException();
-            }
-
-            if (flushing == null)
-            {
-                flushing = SerializeLoopAsync();
-
-                flushing.ContinueWith(
-                    x => ((IDataflowBlock)buffer).Fault(x.Exception!),
-                    CancellationToken.None,
-                    TaskContinuationOptions.OnlyOnFaulted,
-                    TaskScheduler.Default);
-            }
+            Volatile.Write(ref flushing, SerializeLoopAsync());
         }
 
         var fields = new ElasticEntry();
@@ -235,12 +218,8 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
     /// <returns>A task for the dispose operation.</returns>
     protected virtual ValueTask DisposeAsyncCore()
     {
-        lock (buffer)
-        {
-            buffer.Complete();
-        }
-
-        return flushing != null ? new(flushing) : default;
+        var task = CompleteAsync();
+        return task != null ? new(task) : default;
     }
 
     /// <summary>
@@ -253,12 +232,7 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
     {
         if (disposing)
         {
-            lock (buffer)
-            {
-                buffer.Complete();
-            }
-
-            flushing?.Wait();
+            CompleteAsync()?.Wait();
         }
     }
 
@@ -287,26 +261,27 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
         var output = new ArrayBufferWriter<byte>();
         using var writer = new Utf8JsonWriter(output);
 
-        while (await buffer.OutputAvailableAsync(CancellationToken.None).ConfigureAwait(false))
+        while (await serializer.TryFlushAsync(writer, CancellationToken.None).ConfigureAwait(false))
         {
             var opts = fileOptions.CurrentValue;
 
-            using (var cancellation = new CancellationTokenSource(opts.BufferInterval))
+            if (output.WrittenCount < opts.BufferSize)
             {
-                Serialize(buffer, writer);
+                bool active;
+                using var cancellation = new CancellationTokenSource(opts.BufferInterval);
 
-                while (output.WrittenCount < opts.BufferSize && !cancellation.IsCancellationRequested)
+                do
                 {
                     try
                     {
-                        await buffer.OutputAvailableAsync(cancellation.Token).ConfigureAwait(false);
+                        active = await serializer.TryFlushAsync(writer, cancellation.Token).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException)
                     {
+                        active = false;
                     }
-
-                    Serialize(buffer, writer);
                 }
+                while (active && output.WrittenCount < opts.BufferSize);
             }
 
             var path = Path.Combine(
@@ -325,25 +300,12 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
                 await Console.Error.WriteLineAsync($"Error flushing logs: {exception}").ConfigureAwait(false);
             }
         }
-
-        static void Serialize(IReceivableSourceBlock<IJsonLoggable> entries, Utf8JsonWriter writer)
-        {
-            while (entries.TryReceive(out var entry))
-            {
-                entry.Log(writer);
-                writer.WriteRawValue(Delimiter, skipInputValidation: true);
-            }
-        }
     }
 
-    Exception GetException()
+    Task? CompleteAsync()
     {
-        if (buffer.Completion.Exception != null)
-        {
-            return buffer.Completion.Exception.GetBaseException();
-        }
-
-        return new ObjectDisposedException(GetType().FullName);
+        serializer.Complete();
+        return Volatile.Read(ref flushing);
     }
 
     sealed class FilebeatLogger : ILogger
@@ -393,9 +355,9 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
 
             provider.WriteEntry<TState>(entry, new(logLevel, category, eventId, state, exception, formatter));
 
-            if (entry.FieldCount > 0 && !provider.buffer.Post(entry))
+            if (entry.FieldCount > 0 && !provider.serializer.TryAppend(entry))
             {
-                throw provider.GetException();
+                throw new ObjectDisposedException(provider.GetType().FullName);
             }
         }
     }
