@@ -45,7 +45,7 @@ sealed class LogLocal<TState>
         {
             if (entry != null)
             {
-                if (local.Value == null || local.Value.IndexOf(entry) != index)
+                if (local.Value == null || !EqualityComparer<TState>.Default.Equals(local.Value[index], entry))
                 {
                     throw new InvalidOperationException("Local entry not found.");
                 }

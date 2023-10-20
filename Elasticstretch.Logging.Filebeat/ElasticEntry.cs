@@ -48,7 +48,7 @@ sealed class ElasticEntry : IElasticFieldWriter, IJsonLoggable
 
         for (var i = 0; i < FieldCount; i++)
         {
-            var fields = GetFields(0, out var name);
+            var fields = GetFields(i, out var name);
 
             writer.WritePropertyName(name);
             writer.WriteStartArray();

@@ -335,15 +335,11 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
             Func<TState, Exception?, string> formatter)
         {
             var entry = new ElasticEntry();
-
             entry.Merge(fields);
 
-            if (provider.scopes != null)
+            for (var i = 0; i < provider.scopes.Count; i++)
             {
-                for (var i = 0; i < provider.scopes.Count; i++)
-                {
-                    entry.Merge(provider.scopes[i]);
-                }
+                entry.Merge(provider.scopes[i]);
             }
 
             provider.WriteEntry<TState>(entry, new(logLevel, category, eventId, state, exception, formatter));
