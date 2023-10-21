@@ -273,7 +273,7 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
             : new object[] { FallbackAppName, "Production" };
 
         var output = new ArrayBufferWriter<byte>();
-        using var writer = new Utf8JsonWriter(output);
+        using var writer = new Utf8JsonWriter(output, new JsonWriterOptions { SkipValidation = true });
 
         while (await serializer.TryFlushAsync(writer, CancellationToken.None).ConfigureAwait(false))
         {
@@ -306,6 +306,8 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
 
             using var file = OpenFile(path, StreamOptions);
             await file.WriteAsync(output.WrittenMemory).ConfigureAwait(false);
+
+            output.Clear();
         }
     }
 
