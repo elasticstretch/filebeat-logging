@@ -128,7 +128,7 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
 
         using (var field = writer.Begin(ElasticSchema.Fields.Timestamp))
         {
-            field.WriteStringValue(DateTimeOffset.UtcNow);
+            field.WriteStringValue(DateTimeOffset.Now);
         }
 
         using (var field = writer.Begin(ElasticSchema.Fields.LogLevel))
