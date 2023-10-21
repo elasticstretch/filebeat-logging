@@ -5,7 +5,7 @@ using System.Text.Json;
 
 sealed class ElasticEntry : IElasticFieldWriter, IJsonLoggable
 {
-    readonly SortedList<JsonEncodedText, List<IJsonLoggable>> list = new();
+    readonly SortedList<JsonEncodedText, List<IJsonLoggable>> list = new(JsonTextComparer.Instance);
 
     public int FieldCount => list.Count;
 
@@ -80,6 +80,20 @@ sealed class ElasticEntry : IElasticFieldWriter, IJsonLoggable
         }
 
         return group;
+    }
+
+    sealed class JsonTextComparer : IComparer<JsonEncodedText>
+    {
+        private JsonTextComparer()
+        {
+        }
+
+        public static JsonTextComparer Instance { get; } = new();
+
+        public int Compare(JsonEncodedText x, JsonEncodedText y)
+        {
+            return string.CompareOrdinal(x.ToString(), y.ToString());
+        }
     }
 
     sealed class ElasticField : IJsonLoggable
