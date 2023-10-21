@@ -113,6 +113,7 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
     protected virtual void WriteScope<TState>(IElasticFieldWriter writer, string category, TState state)
         where TState : notnull
     {
+        WriteState(writer, category, state);
     }
 
     /// <summary>
@@ -156,6 +157,7 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
         }
 
         WriteExceptions(writer, entry.Exception);
+        WriteState(writer, entry.Category, entry.State);
     }
 
     /// <summary>
@@ -249,6 +251,18 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
         {
             WriteException(writer, exception);
             WriteExceptions(writer, exception.InnerException);
+        }
+    }
+
+    void WriteState<T>(IElasticFieldWriter writer, string category, T state)
+    {
+        if (state is IReadOnlyList<KeyValuePair<string, object?>> properties)
+        {
+            for (var i = 0; i < properties.Count; i++)
+            {
+                var (key, value) = properties[i];
+                WriteProperty(writer, category, key, value);
+            }
         }
     }
 
