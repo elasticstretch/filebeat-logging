@@ -25,6 +25,17 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
     // https://github.com/dotnet/runtime/blob/7a0b4f99a3e90d24e152e5e077839971e7678cfd/src/libraries/Microsoft.Extensions.Hosting/src/HostBuilder.cs#L240
     static readonly string FallbackAppName = Assembly.GetEntryAssembly()?.GetName()?.Name ?? "dotnet";
 
+    static readonly Dictionary<LogLevel, JsonEncodedText> LevelJson =
+        new()
+        {
+            { LogLevel.Trace, JsonEncodedText.Encode(nameof(LogLevel.Trace)) },
+            { LogLevel.Debug, JsonEncodedText.Encode(nameof(LogLevel.Debug)) },
+            { LogLevel.Information, JsonEncodedText.Encode(nameof(LogLevel.Information)) },
+            { LogLevel.Warning, JsonEncodedText.Encode(nameof(LogLevel.Warning)) },
+            { LogLevel.Error, JsonEncodedText.Encode(nameof(LogLevel.Error)) },
+            { LogLevel.Critical, JsonEncodedText.Encode(nameof(LogLevel.Critical)) },
+        };
+
     static readonly FileStreamOptions StreamOptions =
         new()
         {
@@ -133,7 +144,7 @@ public class FilebeatLoggerProvider : ILoggerProvider, IAsyncDisposable
 
         using (var field = writer.Begin(ElasticSchema.Fields.LogLevel))
         {
-            field.WriteNumberValue((int)entry.LogLevel);
+            field.WriteStringValue(LevelJson[entry.LogLevel]);
         }
 
         using (var field = writer.Begin(ElasticSchema.Fields.Message))
